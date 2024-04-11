@@ -1,0 +1,101 @@
+#
+# Directory scanned for segy files. The folder must contains
+# subfolders inside which the segy files are created:
+#
+# scan_dir
+#   subdir1 #e.g. 2024_03_12
+#     file1.sg2
+#     file2.sg2
+#     ...
+#   subdir2 #e.g. 2024_03_13
+#     file1.sg2
+#     file2.sg2
+#     ...
+#
+scan_dir : /path/to/somewhere # absolute path!
+#
+# The subdirs and segy file name patters to look for.
+# The patterns support the python re (regular expression) syntax. 
+# Most used re special characters are:
+#  .  : any single character
+#  \. : the dot '.', which require escaping '\'
+#  .+ : any string (+ means any repetition of preceding re)
+#  .* : any string including empty string
+#  \d : any decimal digit (i.e. 0-9)
+#  \D : any character which is not a decimal digit (opposite of \d)
+#  |  : or e.g. str1|str2 means str1 or str2
+#  () : grouping e.g file_(01|02|03)_\.segy
+#
+subdir_pattern : \d\d\d\d_\d\d_\d\d # yyyy_mm_dd
+file_pattern   : m_.+\.sg2
+#
+# This option cause a buffering_sec delay in the data streaming,
+# This delay time is used to read files and buffering data.
+# That allows to deal with delays in the file generation
+# process without incurring in data gaps, as long as the delay is
+# within buffering_sec
+#
+buffering_sec : 60
+#
+# This option controls the behaviour in case of delayed files
+# generation.
+# If new files are not produced for more than buffering_sec,
+# then the data buffers empty and the streaming stop.
+# When new files become finally available, it is possible to
+# stream them, even though they are late (allow_delayed_data=true)
+# or to drop all the files that contain delayed data 
+# and resume from the current time files (allow_delayed_data=false).
+# allow_delayed_data=true guarantees no data gaps
+# allow_delayed_data=false guarantees no delayed data streaming (it
+# takes some time to transmit delayed data)
+#
+allow_delayed_data : true
+#
+# Change the timestamp of the streamed data to current UTC time
+# This can be useful to simulate the streaming of old data as if
+# it was generated now
+#
+simulate_real_time_data : false
+#
+# The segy files will be split in chunks and streamed
+# in packets whose size is packet_size_microsec
+#
+packet_size_microsec : 200000
+#
+# This is how the data contained in the segy files will be
+# presented to SeisComP (seedlink raw plugin).
+# Each trace in a segy file is represented as a channel id
+# e.g. first trace -> channel id 1, third trace -> channel id 3
+# For each channel id (trace) we have to define its frequency
+# and the sample format we want to stream the data. The frequency
+# must be the same frequency we expect the data to have in the
+# segy file. The sample format can be anything between 
+# int8, int16, int32, float32, float64. However it makes sense
+# to  stream the data in the same format as the original segy
+# files, so there is no risk in losing precision during conversion
+#
+channel_settings:
+  - ids                : [1-24]
+    sampling_frequency : 4000
+    sample_format      : float32
+  - ids                : [25-48]
+    sampling_frequency : 4000
+    sample_format      : float32
+  - ids                : [49-54]
+    sampling_frequency : 4000
+    sample_format      : float32
+  - ids                : [55-63]
+    sampling_frequency : 4000
+    sample_format      : float32
+#
+# Here you can define how many servers you want to spawn
+# and for each server you defines the channel ids served
+# by the server and the port the server listen to
+# Normally one server is enough, but since each server
+# is a separate process, it might be useful for performance
+# reason to serve the channels via multiple servers
+#
+streaming_servers:
+  -   host           : "" # emtpy means all interfaces/ip addresses
+      port           : 65535
+      channels       : [1-63]
