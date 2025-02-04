@@ -1,5 +1,5 @@
 # seedlink_file_streamer
-Stream file data (e.g. segy, miniseed) to a seedlink server using the [raw plugin](<https://github.com/swiss-seismological-service/seedlink_raw_plugin>) version v1.1.
+Stream file data (e.g. segy, miniseed) to a seedlink server using the [raw plugin](<https://github.com/swiss-seismological-service/seedlink_raw_plugin>) version v2.0.
 
 This program monitors a directory for new files and when they become available they are streamed to a seedink server. A file can be anything that `obspy.read` can accept (e.g. segy, miniseed, etc). `obspy.read` convert the file to a `Stream` containing multiple `Traces`. Each `Trace` is mapped to a raw_server channel. Read the example `conf.yaml` to understand more about the program behaviour.
 

@@ -369,7 +369,7 @@ class DataStreamer:
                                     self.streaming_start_time
                             else:
                                 c_start_time = chunk.start_time()
-                            server.feed_data(ch_id, c_start_time, chunk.data())
+                            server.feed_data(ch_id, c_start_time, 100, chunk.data())
 
             streamed_packets += 1
             self.last_streaming_time = stream_end
