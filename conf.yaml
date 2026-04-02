@@ -54,7 +54,7 @@ allow_delayed_data : true
 # This can be useful to simulate the streaming of old data as if
 # it was generated now
 #
-simulate_real_time_data : false
+simulate_current_time_data : false
 #
 # The data will be split in chunks and streamed in packets whose
 # size is packet_size_microsec

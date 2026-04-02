@@ -186,12 +186,12 @@ class DataStreamer:
         self.MAX_PACKET_BURST = 3
         self.packet_len = timedelta(
             microseconds=config["packet_size_microsec"])
-        self.simulate_real_time_data = config["simulate_real_time_data"]
+        self.simulate_current_time_data = config["simulate_current_time_data"]
         self.data_start_time = None
         self.last_streaming_time = None
         self.last_data_streamed_time = None
         self.last_report_time = None
-        self.streaming_start_time = None
+        self.simulated_start_time = None
         self.streaming_start_ns = None
         self.servers = []
         self.buffers = {}
@@ -322,7 +322,7 @@ class DataStreamer:
             self.last_report_time = self.data_start_time
         if self.streaming_start_ns is None:
             self.streaming_start_ns = time.monotonic_ns()  # int
-            self.streaming_start_time = datetime.now(timezone.utc)
+            self.simulated_start_time = datetime.now(timezone.utc)
             logger.info(f"DataStreamer: streaming started")
             return
         #
@@ -364,9 +364,9 @@ class DataStreamer:
                     #
                     for server in self.servers:
                         if ch_id in server.channels:
-                            if self.simulate_real_time_data:
+                            if self.simulate_current_time_data:
                                 c_start_time = chunk.start_time() - self.data_start_time + \
-                                    self.streaming_start_time
+                                    self.simulated_start_time
                             else:
                                 c_start_time = chunk.start_time()
                             server.feed_data(ch_id, c_start_time, 100, chunk.data())
