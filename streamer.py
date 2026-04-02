@@ -187,12 +187,12 @@ class DataStreamer:
         self.packet_len = timedelta(
             microseconds=config["packet_size_microsec"])
         self.simulate_current_time_data = config["simulate_current_time_data"]
-        self.data_start_time = None
-        self.last_streaming_time = None
+        self.streaming_start_time = None
+        self.streaming_end_time = None
         self.last_data_streamed_time = None
         self.last_report_time = None
-        self.simulated_start_time = None
-        self.streaming_start_ns = None
+        self.utctime_at_streaming_start = None
+        self.ns_at_streaming_start = None
         self.servers = []
         self.buffers = {}
         #
@@ -252,12 +252,6 @@ class DataStreamer:
         for server in self.servers:
             server.stop()
 
-    def set_data_start_time(self, data_earliest_time):
-        if self.data_start_time is not None or self.last_streaming_time is not None:
-            raise RuntimeError("Data start time has been already initialized")
-        self.data_start_time = data_earliest_time
-        self.last_streaming_time = self.data_start_time
-
     def has_buffered_data(self):
         for ch_id, buffer in self.buffers.items():
             if not buffer.empty():
@@ -283,23 +277,23 @@ class DataStreamer:
 
     def feed(self, stream):
         #
-        # Initialize data_start_time and last_streaming_time with the
+        # Initialize streaming_start_time and streaming_end_time with the
         # first stream received
         #
-        if self.data_start_time is None:
+        if self.streaming_start_time is None:
             for trace in stream:
-                if self.data_start_time is None:
-                    self.data_start_time = trace.stats.starttime.datetime
-                elif trace.stats.starttime.datetime < self.data_start_time:
-                    self.data_start_time = trace.stats.starttime.datetime
-            self.last_streaming_time = self.data_start_time
+                if self.streaming_start_time is None:
+                    self.streaming_start_time = trace.stats.starttime.datetime
+                elif trace.stats.starttime.datetime < self.streaming_start_time:
+                    self.streaming_start_time = trace.stats.starttime.datetime
+            self.streaming_end_time = self.streaming_start_time
             logger.info(
-                f"DataStreamer initialized: first data time={self.data_start_time}")
+                f"DataStreamer initialized: first data time={self.streaming_start_time}")
         #
         # Store the stream into the channel buffers
         #
         for ch_id, trace in enumerate(stream, start=1):
-            if trace.stats.endtime.datetime < self.last_streaming_time:
+            if trace.stats.endtime.datetime < self.streaming_end_time:
                 logger.info(
                     f"Discard data older than last streamed data time (channel {ch_id} trace time {trace.stats.starttime})")
                 continue
@@ -313,32 +307,33 @@ class DataStreamer:
         #
         # If no data has ever been fed just exit
         #
-        if self.data_start_time is None or self.last_streaming_time is None:
+        if self.streaming_start_time is None or self.streaming_end_time is None:
             return
         #
         # Initialization, just once
         #
         if self.last_report_time is None:
-            self.last_report_time = self.data_start_time
-        if self.streaming_start_ns is None:
-            self.streaming_start_ns = time.monotonic_ns()  # int
-            self.simulated_start_time = datetime.now(timezone.utc)
+            self.last_report_time = self.streaming_start_time
+
+        if self.ns_at_streaming_start is None:
+            self.ns_at_streaming_start = time.monotonic_ns()  # int
+            self.utctime_at_streaming_start = datetime.now(timezone.utc)
             logger.info(f"DataStreamer: streaming started")
             return
         #
         # Keep track of how much time has elapsed since last stream() call
         #
-        elapsed_ns = time.monotonic_ns() - self.streaming_start_ns
-        current_time = self.data_start_time + \
+        elapsed_ns = time.monotonic_ns() - self.ns_at_streaming_start
+        current_time = self.streaming_start_time + \
             timedelta(microseconds=math.floor(elapsed_ns / 1000))
 
         #
         # Pass to the streaming server as many data samples as they fit in the elapsed time
         #
         streamed_packets = 0
-        while self.last_streaming_time < current_time:
+        while self.streaming_end_time < current_time:
 
-            stream_start = self.last_streaming_time
+            stream_start = self.streaming_end_time
             stream_end = stream_start + self.packet_len
 
             # we streamed all the time we could, so exit now
@@ -365,26 +360,26 @@ class DataStreamer:
                     for server in self.servers:
                         if ch_id in server.channels:
                             if self.simulate_current_time_data:
-                                c_start_time = chunk.start_time() - self.data_start_time + \
-                                    self.simulated_start_time
+                                c_start_time = chunk.start_time() - self.streaming_start_time + \
+                                    self.utctime_at_streaming_start
                             else:
                                 c_start_time = chunk.start_time()
                             server.feed_data(ch_id, c_start_time, 100, chunk.data())
 
             streamed_packets += 1
-            self.last_streaming_time = stream_end
+            self.streaming_end_time = stream_end
             if data_available:
                 self.last_data_streamed_time = stream_end
         #
         # This should not be necessary, but better be safe
         #
         for buffer in self.buffers.values():
-            buffer.drop_older_than(self.last_streaming_time)
+            buffer.drop_older_than(self.streaming_end_time)
         #
         # Periodic status report
         #
         if current_time - self.last_report_time > timedelta(seconds=30):
-            logger.info(f"DataStreamer report: elapsed time {current_time-self.data_start_time} "
+            logger.info(f"DataStreamer report: elapsed time {current_time-self.streaming_start_time} "
                         f"current time {current_time} last data {self.last_data_streamed_time} "
                         f"(delay {(current_time-self.last_data_streamed_time).total_seconds()} sec)")
             self.last_report_time = current_time
