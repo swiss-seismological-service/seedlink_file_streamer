@@ -182,17 +182,24 @@ class ChannelDataBuffer:
 
 class DataStreamer:
 
-    def __init__(self, config):
-        self.MAX_PACKET_BURST = 3
-        self.packet_len = timedelta(
-            microseconds=config["packet_size_microsec"])
-        self.simulate_current_time_data = config["simulate_current_time_data"]
+    def __init__(self,
+                 packet_len,
+                 simulate_current_time_data,
+                 catch_up_mode,
+                 buffering_time,
+                 channel_settings,
+                 streaming_servers):
+        self.packet_len = packet_len
+        self.simulate_current_time_data = simulate_current_time_data
+        self.catch_up_mode = catch_up_mode
+        self.buffering_time = buffering_time
         self.streaming_start_time = None
         self.streaming_end_time = None
         self.last_data_streamed_time = None
         self.last_report_time = None
         self.utctime_at_streaming_start = None
         self.ns_at_streaming_start = None
+        self.to_catch_up = timedelta(0)
         self.servers = []
         self.buffers = {}
         #
@@ -200,7 +207,7 @@ class DataStreamer:
         #
         sampling_freq = {}
         data_format = {}
-        for cfg in config["channel_settings"]:
+        for cfg in channel_settings:
             freq = cfg["sampling_frequency"]
             frmt = cfg["sample_format"]
             for ch_id in cfg["ids"]:
@@ -217,7 +224,7 @@ class DataStreamer:
         # Initialize the streaming servers
         #
         streamers = []
-        for server in config['streaming_servers']:
+        for server in streaming_servers:
             channels = []
             for ch_id in server['channels']:
                 if str(ch_id).isdigit():
@@ -252,19 +259,13 @@ class DataStreamer:
         for server in self.servers:
             server.stop()
 
-    def has_buffered_data(self):
-        for ch_id, buffer in self.buffers.items():
-            if not buffer.empty():
-                return True
-        return False
-
     def buffer_time_span(self):
         start = self.buffer_start_time()
         if start is None:
-            return None
+            return timedelta(0)
         end = self.buffer_end_time()
         if end is None:
-            return None
+            return timedelta(0)
         return end - start
 
     def buffer_start_time(self):
@@ -303,7 +304,7 @@ class DataStreamer:
                         f"Feeding channel {ch_id} {trace.stats.starttime.datetime} ~ {trace.stats.endtime.datetime}")
                     self.buffers[ch_id].push(trace)
 
-    def stream(self):
+    def stream(self, max_to_stream=None):
         #
         # If no data has ever been fed just exit
         #
@@ -318,42 +319,48 @@ class DataStreamer:
         if self.ns_at_streaming_start is None:
             self.ns_at_streaming_start = time.monotonic_ns()  # int
             self.utctime_at_streaming_start = datetime.now(timezone.utc)
+            if self.catch_up_mode:
+                self.to_catch_up = self.utctime_at_streaming_start - \
+                    self.streaming_start_time.replace(tzinfo=timezone.utc)
+                self.to_catch_up -= self.buffering_time
             logger.info(f"DataStreamer: streaming started")
             return
+
         #
         # Keep track of how much time has elapsed since last stream() call
         #
         elapsed_ns = time.monotonic_ns() - self.ns_at_streaming_start
-        current_time = self.streaming_start_time + \
-            timedelta(microseconds=math.floor(elapsed_ns / 1000))
+        elapsed = timedelta(microseconds=math.floor(elapsed_ns / 1000))
+        current_time = self.streaming_start_time + elapsed + self.to_catch_up
+
+        #
+        # Compute how much time of data we may stream
+        #
+        if max_to_stream is None:
+            max_allowed_end_time = current_time
+        else:
+            max_allowed_end_time = min(current_time, self.streaming_end_time + max_to_stream)
 
         #
         # Pass to the streaming server as many data samples as they fit in the elapsed time
         #
-        streamed_packets = 0
-        while self.streaming_end_time < current_time:
+        while self.streaming_end_time < max_allowed_end_time:
 
             stream_start = self.streaming_end_time
             stream_end = stream_start + self.packet_len
 
             # we streamed all the time we could, so exit now
-            if stream_end > current_time:
-                break
-
-            # Stream no more than N packets at the time, then exit the loop
-            # we don't want to get stuck in this loop for too long because we want
-            # to give a chance to the other parts of the code logic to run
-            if streamed_packets > self.MAX_PACKET_BURST:
+            if stream_end > max_allowed_end_time:
                 break
 
             #
             # Fetch a packet of data from the buffers and stream it
             #
-            data_available = False
             for ch_id, buffer in self.buffers.items():
                 chunk_list = buffer.pop(stream_start, stream_end)
+                if chunk_list:
+                    self.last_data_streamed_time = stream_end
                 for chunk in chunk_list:
-                    data_available = True
                     #
                     # Finally stream the data to all the servers that accept this channel
                     #
@@ -366,10 +373,7 @@ class DataStreamer:
                                 c_start_time = chunk.start_time()
                             server.feed_data(ch_id, c_start_time, 100, chunk.data())
 
-            streamed_packets += 1
             self.streaming_end_time = stream_end
-            if data_available:
-                self.last_data_streamed_time = stream_end
         #
         # This should not be necessary, but better be safe
         #
@@ -379,9 +383,12 @@ class DataStreamer:
         # Periodic status report
         #
         if current_time - self.last_report_time > timedelta(seconds=30):
-            logger.info(f"DataStreamer report: elapsed time {current_time-self.streaming_start_time} "
-                        f"current time {current_time} last data {self.last_data_streamed_time} "
-                        f"(delay {(current_time-self.last_data_streamed_time).total_seconds()} sec)")
+            buffered_time = self.buffer_time_span()
+            logger.info(f"DataStreamer report: elapsed time {elapsed} "
+                        f"streaming time {max_allowed_end_time} "
+                        f"last streamed data {self.last_data_streamed_time} "
+                        f"(delay {(current_time-self.last_data_streamed_time).total_seconds()} sec, "
+                        f" buffer {buffered_time.total_seconds()} sec)")
             self.last_report_time = current_time
 
 
@@ -472,10 +479,10 @@ class FileScanner:
 
 
 class DirectoryScanner:
-    def __init__(self, config, starting_file):
-        self.scan_dir = Path(config['scan_dir'])
-        self.subdir_filter = PathFilter(config['subdir_pattern'])
-        self.file_filter = PathFilter(config['file_pattern'])
+    def __init__(self, scan_dir, subdir_pattern, file_pattern, starting_file):
+        self.scan_dir = Path(scan_dir)
+        self.subdir_filter = PathFilter(subdir_pattern)
+        self.file_filter = PathFilter(file_pattern)
         self.starting_file = starting_file
 
         self.processed = set()
@@ -583,7 +590,7 @@ class DirectoryScanner:
         return None
 
 
-def run(config, starting_file):
+def run(config, starting_file, catch_up_mode):
     """
     Main acquisition loop, run's until ctrl + c.
     """
@@ -598,74 +605,102 @@ def run(config, starting_file):
     #
     # Read configuration
     #
+    packet_len = timedelta(microseconds=config["packet_size_microsec"])
     buffering_time = timedelta(seconds=config['buffering_sec'])
     allow_delayed_data = config['allow_delayed_data']
-    can_stream = False
 
     #
     # start the data streaming servers
     #
-    server = DataStreamer(config)
+    server = DataStreamer(
+        packet_len=packet_len,
+        simulate_current_time_data=config["simulate_current_time_data"],
+        catch_up_mode=catch_up_mode,
+        buffering_time=buffering_time,
+        channel_settings=config["channel_settings"],
+        streaming_servers=config['streaming_servers']
+    )
     server.start()
 
     #
     # start the directory scanner
     #
     logger.info("Starting data acquisition...")
-    dir_scanner = DirectoryScanner(config, starting_file)
+    dir_scanner = DirectoryScanner(
+        scan_dir=config['scan_dir'],
+        subdir_pattern=config['subdir_pattern'],
+        file_pattern=config['file_pattern'],
+        starting_file=starting_file
+    )
 
     try:
         #
         # Run until ctrl + c
         #
+        can_stream = False
         while True:
 
             buffered_time = server.buffer_time_span()
+            enough_data_to_stream = buffered_time >= packet_len
 
             #
-            # If the streaming buffer is below the configured threshold
-            # get the next available file and feed it to the streaming server
+            # If the streaming buffer is low on data, feed the next available
+            # file to the streaming server
             #
-            if buffered_time is None or buffered_time < buffering_time:
+            if not enough_data_to_stream or buffered_time < buffering_time:
                 next_file = dir_scanner.next_file()
                 if next_file is not None:
                     logger.info(
-                        f"Loading file {next_file} (buffer {buffered_time.total_seconds() if buffered_time is not None else 0} sec)")
+                        f"Loading file {next_file} (buffer {buffered_time.total_seconds()} sec)")
                     stream = read_file(next_file)
                     if stream is not None:
                         server.feed(stream)
 
             #
-            # If the data buffer are empty stop the streaming if allow_delayed_data is true
-            # Otherwise the DataStreamer would create data gaps.
+            # if allow_delayed_data is true, stop the streaming when the buffer
+            # is low on data, to avoid DataStreamer to create data gaps.
             # We will restart the streaming later, when new files have beed fed to the
             # DataStreamer
             #
-            if allow_delayed_data and buffered_time is None:
+            if allow_delayed_data and not enough_data_to_stream:
                 if can_stream:
                     logger.info(
                         "No data in buffers: stop streaming and wait for new data.")
                     can_stream = False
 
             #
-            # Stream data (if enabled)
+            # Stream data
             #
             if can_stream:
-                server.stream()
+                #
+                # Compute how much time of data we may stream
+                #
+                if enough_data_to_stream:
+                    # Limit the amount of data to be stramed to give a change to
+                    # load and buffer other files before the next call to stream()
+                    # This prevents gaps
+                    max_to_stream = min(buffered_time, timedelta(seconds=1))
+                else:
+                    # if there is not enough data to be streamed than the files
+                    # have not been generated in time and allow_delayed_data is
+                    # disabled.So there is no point in limiting the stream, and
+                    # it will generate a gap
+                    max_to_stream = None
+                #
+                # Finally steam
+                #
+                server.stream(max_to_stream)
             #
             # check if we have buffered enough data, in which case start the streaming
             #
             else:
-                if buffered_time is not None and buffered_time >= buffering_time:
+                if buffered_time >= buffering_time:
                     logger.info(
                         f"Buffering completed: {buffered_time.total_seconds()} sec, start streaming...")
                     can_stream = True
 
             # we don't want to use 100% cpu, so sleep a while
             sleep_sec = 0.250
-            if sleep_sec > (server.packet_len.total_seconds()
-                            * server.MAX_PACKET_BURST):
-                raise ValueError("Internal error: sleep time too high")
             time.sleep(sleep_sec)
 
     except KeyboardInterrupt:
@@ -679,25 +714,37 @@ def run(config, starting_file):
 
 if __name__ == '__main__':
 
-    if len(sys.argv) not in (2, 3):
+    if len(sys.argv) not in (2, 3, 4):
         print(f"""
 Usage:
-   {sys.argv[0]} config.yaml [starting-file]
+   {sys.argv[0]} config.yaml [starting-file] [--catch-up]
+
+E.g.
+   {sys.argv[0]} config.yaml
+   {sys.argv[0]} config.yaml latest
+   {sys.argv[0]} config.yaml oldest --catch-up
+   {sys.argv[0]} config.yaml scan_dir/yyyy_mm_dd/file.seg2 --catch-up
 
 starting-file (optional):
-  specify from which file to start reading
-  and streaming data (e.g. scan_dir/yyyy_mm_dd/file.seg2)
+  Specify from which file to start reading and streaming data. It is optional
+  and the default value is "latest"
 
   Special values are:
    "oldest" : start from the oldest file (the first)
    "latest" : skip all existing files and start from the latest (excluded)
 
-  starting-file is optional and the default value is "latest"
+
+--catch-up (optional):
+  Instruct the server to stream the data as fast as possible until it reaches
+  the current time (minus buffering_sec). Without this option the data is emitted
+  at its original rate, that is 10 seconds of data are streamed in 10 seconds
+
 """)
         sys.exit(0)
 
     cfg_path = sys.argv[1]
     starting_file = sys.argv[2] if len(sys.argv) >= 3 else "latest"
+    catch_up = True if (len(sys.argv) >= 4 and sys.argv[3] == "--catch-up") else False
 
     config = None
     try:
@@ -707,4 +754,4 @@ starting-file (optional):
         logger.error(f"Error loading configuration file {cfg_path}: {err}")
         exit(-1)
 
-    run(config, starting_file)
+    run(config, starting_file, catch_up)
