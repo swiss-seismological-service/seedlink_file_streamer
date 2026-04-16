@@ -348,10 +348,8 @@ class DataStreamer:
 
             stream_start = self.streaming_end_time
             stream_end = stream_start + self.packet_len
-
-            # we streamed all the time we could, so exit now
             if stream_end > max_allowed_end_time:
-                break
+                stream_end = max_allowed_end_time
 
             #
             # Fetch a packet of data from the buffers and stream it
@@ -387,8 +385,8 @@ class DataStreamer:
             logger.info(f"DataStreamer report: elapsed time {elapsed} "
                         f"streaming time {max_allowed_end_time} "
                         f"last streamed data {self.last_data_streamed_time} "
-                        f"(delay {(current_time-self.last_data_streamed_time).total_seconds()} sec, "
-                        f" buffer {buffered_time.total_seconds()} sec)")
+                        f"(delay {(current_time -self.last_data_streamed_time).total_seconds()} sec, "
+                        f" buffer {buffered_time.total_seconds()} sec {self.buffer_start_time()} ~ {self.buffer_end_time()})")
             self.last_report_time = current_time
 
 
@@ -634,20 +632,30 @@ def run(config, starting_file, catch_up_mode):
     )
 
     try:
+        can_stream = False
+        # Note that the ratio between max_time_burst and sleep_sec value
+        # define the maximum streaming speed in catch-up mode
+        sleep_sec = 0.250
+        max_time_burst = timedelta(seconds=1.0)
+        if packet_len > max_time_burst:
+            max_time_burst = packet_len
+        else:
+            # make max_time_burst a multiple of packet_len
+            n = round(max_time_burst / packet_len)
+            n = max(1, n)
+            max_time_burst = n * packet_len
         #
         # Run until ctrl + c
         #
-        can_stream = False
         while True:
 
             buffered_time = server.buffer_time_span()
-            enough_data_to_stream = buffered_time >= packet_len
-
+            enough_data_to_stream = buffered_time >= timedelta(0)
             #
             # If the streaming buffer is low on data, feed the next available
             # file to the streaming server
             #
-            if not enough_data_to_stream or buffered_time < buffering_time:
+            if buffered_time < buffering_time:
                 next_file = dir_scanner.next_file()
                 if next_file is not None:
                     logger.info(
@@ -679,7 +687,7 @@ def run(config, starting_file, catch_up_mode):
                     # Limit the amount of data to be stramed to give a change to
                     # load and buffer other files before the next call to stream()
                     # This prevents gaps
-                    max_to_stream = min(buffered_time, timedelta(seconds=1))
+                    max_to_stream = min(buffered_time, max_time_burst)
                 else:
                     # if there is not enough data to be streamed than the files
                     # have not been generated in time and allow_delayed_data is
@@ -700,7 +708,6 @@ def run(config, starting_file, catch_up_mode):
                     can_stream = True
 
             # we don't want to use 100% cpu, so sleep a while
-            sleep_sec = 0.250
             time.sleep(sleep_sec)
 
     except KeyboardInterrupt:
